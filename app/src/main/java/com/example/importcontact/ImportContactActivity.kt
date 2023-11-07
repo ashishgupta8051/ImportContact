@@ -9,27 +9,32 @@ import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.provider.ContactsContract
+import android.provider.ContactsContract.RawContacts
 import android.util.Log
+import android.view.View
+import android.view.View.OnClickListener
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import com.example.importcontact.databinding.ActivityImportContactBinding
-import android.provider.ContactsContract.RawContacts
-import android.view.View
-import android.view.View.OnClickListener
-import androidx.lifecycle.MutableLiveData
 import com.example.importcontact.adapter.ContactAdapter
+import com.example.importcontact.databinding.ActivityImportContactBinding
 import com.example.importcontact.model.Contact
-import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import java.io.BufferedReader
+
 
 class ImportContactActivity : AppCompatActivity(), OnClickListener {
     private lateinit var binding: ActivityImportContactBinding
-    private lateinit var adapter: ContactAdapter
+    private val adapter: ContactAdapter = ContactAdapter()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,8 +67,8 @@ class ImportContactActivity : AppCompatActivity(), OnClickListener {
                 1 -> {
                     CoroutineScope(Dispatchers.IO).launch {
                         val count = readVCFFromAssets()
-                        withContext(Dispatchers.Main){
-                            if (count == 0){
+                        withContext(Dispatchers.Main) {
+                            if (count == 0) {
                                 Toast.makeText(
                                     this@ImportContactActivity,
                                     "Something is wrong",
@@ -72,7 +77,7 @@ class ImportContactActivity : AppCompatActivity(), OnClickListener {
                                 hideProgress()
                                 binding.btnImportContact.isEnabled = true
                                 setAdapter()
-                            }else{
+                            } else {
                                 hideProgress()
                                 Toast.makeText(
                                     this@ImportContactActivity,
@@ -124,12 +129,11 @@ class ImportContactActivity : AppCompatActivity(), OnClickListener {
     private fun setAdapter() {
         CoroutineScope(Dispatchers.IO).launch {
             val contactList = retrieveAllContacts()
-            withContext(Dispatchers.Main){
+            withContext(Dispatchers.Main) {
                 if (contactList.isEmpty()) {
                     hideProgress()
-                    adapter = ContactAdapter()
                     binding.tvContactTotalSize.text = "Total Size: 0"
-                    adapter.notifyDataSetChanged()
+                    adapter.getContactList(contactList)
                     binding.btnFetchContact.isEnabled = true
                 } else {
                     hideProgress()
@@ -152,22 +156,25 @@ class ImportContactActivity : AppCompatActivity(), OnClickListener {
                 binding.tvContactTotalSize.text = "Total Size: $count"
             }
             val assetManager = assets
-            val fileName = "contacts_2_nfr_1L_1K.vcf" // Put your VCF file name here
+            val fileName = "contacts_2_nfr_50K_1L.vcf" // Put your VCF file name here
+//            val fileName = "contacts_2_nfr_1L_1K.vcf"
             val inputStream = assetManager.open(fileName)
             val reader = inputStream.bufferedReader()
 
             var isPhoneNumber = false
             var phoneNumber: String? = null
-            while (reader.readLine()?.also { line ->
+            while (withContext(Dispatchers.IO) {
+                    reader.readLine()
+                }?.also { line ->
 //                    Log.d("VCFData", line)
                     if (line.startsWith("FN")) {
                         phoneNumber = line.substring(3)
                         isPhoneNumber = true
-                        importContactNumber(phoneNumber ?: "", phoneNumber ?: "")
+                        importContactNumber(phoneNumber ?: "N/A", phoneNumber ?: "N/A")
                     } else if (isPhoneNumber) {
                         count += 1
                         withContext(Dispatchers.Main) {
-                            binding.tvContactTotalSize.text = "Total Size: $count"
+                            binding.tvContactTotalSize.text = "Contact Imported: $count"
                         }
                         Log.d("ContactNumber", ("$phoneNumber Count:$count"))
                         isPhoneNumber = false
@@ -175,7 +182,11 @@ class ImportContactActivity : AppCompatActivity(), OnClickListener {
                     }
                 } != null) {
             }
-            reader.close()
+
+            withContext(Dispatchers.IO) {
+                reader.close()
+            }
+
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -183,6 +194,7 @@ class ImportContactActivity : AppCompatActivity(), OnClickListener {
         return count
     }
 
+    @SuppressLint("SetTextI18n")
     private fun importContactNumber(phoneNumber: String, contactName: String) {
         val contentResolver: ContentResolver = contentResolver
         val rawContactUri =
@@ -223,6 +235,7 @@ class ImportContactActivity : AppCompatActivity(), OnClickListener {
 
         contentResolver.applyBatch(ContactsContract.AUTHORITY, arrayListOf(phoneOperation))
     }
+
 
     @SuppressLint("Range")
     suspend fun retrieveAllContacts(): List<Contact> {
