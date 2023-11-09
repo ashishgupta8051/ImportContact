@@ -22,6 +22,7 @@ import com.example.importcontact.databinding.ActivityImportContactBinding
 import com.example.importcontact.model.Contact
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.catch
@@ -30,11 +31,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
+import java.util.concurrent.Executors
 
 
 class ImportContactActivity : AppCompatActivity(), OnClickListener {
     private lateinit var binding: ActivityImportContactBinding
     private val adapter: ContactAdapter = ContactAdapter()
+    private val threadPool = Executors.newFixedThreadPool(4).asCoroutineDispatcher()
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -77,6 +81,7 @@ class ImportContactActivity : AppCompatActivity(), OnClickListener {
                                 hideProgress()
                                 binding.btnImportContact.isEnabled = true
                                 setAdapter()
+                                threadPool.close()
                             } else {
                                 hideProgress()
                                 Toast.makeText(
@@ -86,6 +91,7 @@ class ImportContactActivity : AppCompatActivity(), OnClickListener {
                                 ).show()
                                 binding.btnImportContact.isEnabled = true
                                 setAdapter()
+                                threadPool.close()
                             }
                         }
                     }
@@ -107,16 +113,17 @@ class ImportContactActivity : AppCompatActivity(), OnClickListener {
                                     Toast.LENGTH_SHORT
                                 ).show()
                                 hideProgress()
+                                threadPool.close()
                             }
                         } else {
                             withContext(Dispatchers.Main) {
                                 binding.btnDeleteContact.isEnabled = true
                                 hideProgress()
-                                Toast.makeText(
-                                    this@ImportContactActivity,
+                                Toast.makeText(this@ImportContactActivity,
                                     "Something is wrong",
                                     Toast.LENGTH_SHORT
                                 ).show()
+                                threadPool.close()
                             }
                         }
                     }
@@ -153,11 +160,10 @@ class ImportContactActivity : AppCompatActivity(), OnClickListener {
             withContext(Dispatchers.Main) {
                 showProgress()
                 binding.btnImportContact.isEnabled = false
-                binding.tvContactTotalSize.text = "Total Size: $count"
             }
             val assetManager = assets
-            val fileName = "contacts_2_nfr_50K_1L.vcf" // Put your VCF file name here
-//            val fileName = "contacts_2_nfr_1L_1K.vcf"
+//            val fileName = "contacts_2_nfr_50K_1L.vcf" // Put your VCF file name here
+            val fileName = "contacts_2_nfr_1L_1K.vcf"
             val inputStream = assetManager.open(fileName)
             val reader = inputStream.bufferedReader()
 
@@ -196,46 +202,36 @@ class ImportContactActivity : AppCompatActivity(), OnClickListener {
 
     @SuppressLint("SetTextI18n")
     private fun importContactNumber(phoneNumber: String, contactName: String) {
-        val contentResolver: ContentResolver = contentResolver
-        val rawContactUri =
-            contentResolver.insert(RawContacts.CONTENT_URI, ContentValues()) ?: return
-        val rawContactId = ContentUris.parseId(rawContactUri)
+        runBlocking {
+            val contentResolver: ContentResolver = contentResolver
+            val operations = ArrayList<ContentProviderOperation>()
+            val rawContactUri = contentResolver.insert(RawContacts.CONTENT_URI, ContentValues()) ?: return@runBlocking
+            val rawContactId = ContentUris.parseId(rawContactUri)
 
-        // Insert the contact name if available
-        if (contactName.isNotBlank()) {
-            val nameOperation =
-                ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
-                    .withValue(ContactsContract.Data.RAW_CONTACT_ID, rawContactId)
-                    .withValue(
-                        ContactsContract.Data.MIMETYPE,
-                        ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE
-                    )
-                    .withValue(
-                        ContactsContract.CommonDataKinds.StructuredName.DISPLAY_NAME,
-                        contactName
-                    )
-                    .build()
+            // Insert the contact name if available
+            val nameValues = ContentValues()
+            nameValues.put(ContactsContract.Data.RAW_CONTACT_ID, rawContactId)
+            nameValues.put(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE)
+            nameValues.put(ContactsContract.CommonDataKinds.StructuredName.DISPLAY_NAME, contactName)
+            val nameOperation = ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI).withValues(nameValues).build()
+            operations.add(nameOperation)
 
-            contentResolver.applyBatch(ContactsContract.AUTHORITY, arrayListOf(nameOperation))
+            // Insert the contact number
+            val phoneValues = ContentValues()
+            phoneValues.put(ContactsContract.Data.RAW_CONTACT_ID, rawContactId)
+            phoneValues.put(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE)
+            phoneValues.put(ContactsContract.CommonDataKinds.Phone.NUMBER, phoneNumber)
+            phoneValues.put(ContactsContract.CommonDataKinds.Phone.TYPE, ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE)
+            val phoneOperation = ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI).withValues(phoneValues).build()
+            operations.add(phoneOperation)
+
+
+            launch(threadPool) {
+                    contentResolver.applyBatch(ContactsContract.AUTHORITY,operations)
+                    Log.e("Thread: ","${Thread.currentThread().name}, Number: $phoneNumber")
+            }
         }
-
-        // Insert the contact number
-        val phoneOperation = ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
-            .withValue(ContactsContract.Data.RAW_CONTACT_ID, rawContactId)
-            .withValue(
-                ContactsContract.Data.MIMETYPE,
-                ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE
-            )
-            .withValue(ContactsContract.CommonDataKinds.Phone.NUMBER, phoneNumber)
-            .withValue(
-                ContactsContract.CommonDataKinds.Phone.TYPE,
-                ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE
-            )
-            .build()
-
-        contentResolver.applyBatch(ContactsContract.AUTHORITY, arrayListOf(phoneOperation))
     }
-
 
     @SuppressLint("Range")
     suspend fun retrieveAllContacts(): List<Contact> {
@@ -278,23 +274,58 @@ class ImportContactActivity : AppCompatActivity(), OnClickListener {
         return contactsList
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        when (requestCode) {
-            1001 -> {
-                if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                    Toast.makeText(this, "Contact permission granted", Toast.LENGTH_LONG).show()
-                } else {
-                    Toast.makeText(this, " Contact permission not granted", Toast.LENGTH_LONG)
-                        .show()
-                    // Permission denied, handle it accordingly (e.g., show a message or request the permission again)
+    @SuppressLint("Range")
+    suspend fun deleteAllContacts(): Boolean {
+        runBlocking {
+            withContext(Dispatchers.Main) {
+                binding.btnDeleteContact.isEnabled = false
+                showProgress()
+            }
+            val contentResolver: ContentResolver = contentResolver
+            // Get the list of all contact IDs
+            val contactIds = mutableListOf<Long>()
+            val cursor = contentResolver.query(
+                ContactsContract.Contacts.CONTENT_URI,
+                null,
+                null,
+                null,
+                null
+            )
+
+            cursor?.use {
+                while (it.moveToNext()) {
+                    val contactId = it.getLong(it.getColumnIndex(ContactsContract.Contacts._ID))
+                    contactIds.add(contactId)
+                }
+            }
+
+            cursor?.close()
+
+            // Delete each contact individually
+            for (contactId in contactIds) {
+                val deleteUri = RawContacts.CONTENT_URI.buildUpon()
+                    .appendQueryParameter(ContactsContract.CALLER_IS_SYNCADAPTER, "true")
+                    .build()
+
+                val ops = arrayListOf<ContentProviderOperation>()
+                ops.add(
+                    ContentProviderOperation.newDelete(deleteUri)
+                        .withSelection(RawContacts.CONTACT_ID + "=?", arrayOf(contactId.toString()))
+                        .build()
+                )
+
+                try {
+                    launch(threadPool) {
+                        contentResolver.applyBatch(ContactsContract.AUTHORITY, ops)
+                        Log.e("Thread: ", Thread.currentThread().name)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
                 }
             }
         }
+
+        return true
     }
 
     @SuppressLint("SetTextI18n")
@@ -316,61 +347,31 @@ class ImportContactActivity : AppCompatActivity(), OnClickListener {
         }
     }
 
-    @SuppressLint("Range")
-    suspend fun deleteAllContacts(): Boolean {
-        withContext(Dispatchers.Main) {
-            binding.btnDeleteContact.isEnabled = false
-            showProgress()
-        }
-        val contentResolver: ContentResolver = contentResolver
-        // Get the list of all contact IDs
-        val contactIds = mutableListOf<Long>()
-        val cursor = contentResolver.query(
-            ContactsContract.Contacts.CONTENT_URI,
-            null,
-            null,
-            null,
-            null
-        )
-
-        cursor?.use {
-            while (it.moveToNext()) {
-                val contactId = it.getLong(it.getColumnIndex(ContactsContract.Contacts._ID))
-                contactIds.add(contactId)
-            }
-        }
-
-        cursor?.close()
-
-        // Delete each contact individually
-        for (contactId in contactIds) {
-            val deleteUri = RawContacts.CONTENT_URI.buildUpon()
-                .appendQueryParameter(ContactsContract.CALLER_IS_SYNCADAPTER, "true")
-                .build()
-
-            val ops = arrayListOf<ContentProviderOperation>()
-            ops.add(
-                ContentProviderOperation.newDelete(deleteUri)
-                    .withSelection(RawContacts.CONTACT_ID + "=?", arrayOf(contactId.toString()))
-                    .build()
-            )
-
-            try {
-                contentResolver.applyBatch(ContactsContract.AUTHORITY, ops)
-            } catch (e: Exception) {
-                return false
-            }
-        }
-        return true
-    }
-
-
     private fun showProgress() {
         binding.progresssBar.visibility = View.VISIBLE
     }
 
     private fun hideProgress() {
         binding.progresssBar.visibility = View.GONE
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        when (requestCode) {
+            1001 -> {
+                if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                    Toast.makeText(this, "Contact permission granted", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(this, " Contact permission not granted", Toast.LENGTH_LONG)
+                        .show()
+                    // Permission denied, handle it accordingly (e.g., show a message or request the permission again)
+                }
+            }
+        }
     }
 
 }
